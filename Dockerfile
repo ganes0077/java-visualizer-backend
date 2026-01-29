@@ -1,7 +1,10 @@
 # 1. Build the App
 FROM maven:3.9.5-eclipse-temurin-17 AS build
 WORKDIR /app
-COPY . .
+
+# ⚠️ CRITICAL CHANGE: Grab files from the 'backend' folder
+COPY backend/ . 
+
 RUN mvn clean package -DskipTests
 
 # 2. Run the App
