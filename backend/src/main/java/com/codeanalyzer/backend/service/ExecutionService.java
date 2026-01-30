@@ -14,7 +14,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Service
 public class ExecutionService {
@@ -26,20 +28,19 @@ public class ExecutionService {
         String modifiedCode = instrumentationService.instrument(sourceCode);
 
         try {
-            // 1. Create a Temp Directory for this execution
+            // 1. Create a Temp Directory
             Path tempDir = Files.createTempDirectory("java_exec");
             
             // 2. Write the User's Main.java
             Path sourcePath = tempDir.resolve("Main.java");
             Files.write(sourcePath, modifiedCode.getBytes());
 
-            // 3. GENERATE MOCK FILES (Tracer & ExecutionStep) inside tempDir
-            // This is crucial: javac cannot read from your JAR, so we give it fresh source files.
+            // 3. GENERATE MOCK FILES (Tracer & ExecutionStep)
+            // These allow the user's code to compile in the temp folder
             createMockFiles(tempDir);
 
             // 4. Compile
             JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
-            // We include tempDir in the classpath so Main can find Tracer
             int result = compiler.run(null, System.out, System.err, 
                 "-cp", tempDir.toString(), 
                 sourcePath.toString());
@@ -58,16 +59,13 @@ public class ExecutionService {
             try {
                 mainMethod.invoke(null, (Object) new String[0]);
             } catch (Exception e) {
-                // Ignore runtime exceptions from user code for now
+                // Ignore runtime exceptions from user code
             }
 
             // 6. RETRIEVE DATA VIA REFLECTION
-            // We cannot use the static Tracer from our backend. We must use the one 
-            // that was compiled and loaded inside the temp classloader.
             Class<?> tracerClass = classLoader.loadClass("com.codeanalyzer.backend.service.Tracer");
             Method getTraceMethod = tracerClass.getMethod("getTrace");
             
-            // Get the list of objects (these are MockExecutionSteps)
             List<?> rawSteps = (List<?>) getTraceMethod.invoke(null);
 
             // 7. Convert Mock Objects to Real ExecutionStep Objects
@@ -82,15 +80,13 @@ public class ExecutionService {
     // --- HELPER METHODS ---
 
     private void createMockFiles(Path tempDir) throws Exception {
-        // Create package structure: com/codeanalyzer/backend/service
         Path serviceDir = tempDir.resolve("com/codeanalyzer/backend/service");
         Files.createDirectories(serviceDir);
 
-        // Create package structure: com/codeanalyzer/backend/model
         Path modelDir = tempDir.resolve("com/codeanalyzer/backend/model");
         Files.createDirectories(modelDir);
 
-        // --- 1. Write Mock ExecutionStep.java ---
+        // Mock ExecutionStep for the TEMP compilation only
         String executionStepSource = 
             "package com.codeanalyzer.backend.model;\n" +
             "public class ExecutionStep {\n" +
@@ -108,7 +104,7 @@ public class ExecutionService {
             "}";
         Files.write(modelDir.resolve("ExecutionStep.java"), executionStepSource.getBytes());
 
-        // --- 2. Write Mock Tracer.java ---
+        // Mock Tracer
         String tracerSource = 
             "package com.codeanalyzer.backend.service;\n" +
             "import com.codeanalyzer.backend.model.ExecutionStep;\n" +
@@ -118,11 +114,11 @@ public class ExecutionService {
             "    private static List<ExecutionStep> trace = new ArrayList<>();\n" +
             "    public static void start() { trace.clear(); }\n" +
             "    public static void snapshot(int line, String method, String variable, Object value) {\n" +
-            "        if (trace.size() > 1000) return;\n" + // Safety limit
+            "        if (trace.size() > 1000) return;\n" +
             "        trace.add(new ExecutionStep(line, method, variable, String.valueOf(value)));\n" +
             "    }\n" +
-            "    public static void enterMethod(String method) {}\n" + // No-op
-            "    public static void exitMethod() {}\n" + // No-op
+            "    public static void enterMethod(String method) {}\n" +
+            "    public static void exitMethod() {}\n" +
             "    public static List<ExecutionStep> getTrace() { return trace; }\n" +
             "}";
         Files.write(serviceDir.resolve("Tracer.java"), tracerSource.getBytes());
@@ -132,7 +128,7 @@ public class ExecutionService {
         List<ExecutionStep> realSteps = new ArrayList<>();
         try {
             for (Object obj : rawSteps) {
-                // Use reflection to read fields from the loaded object
+                // 1. Get raw data from the temporary object using reflection
                 Method getLine = obj.getClass().getMethod("getLine");
                 Method getMethod = obj.getClass().getMethod("getMethod");
                 Method getVariable = obj.getClass().getMethod("getVariable");
@@ -143,12 +139,16 @@ public class ExecutionService {
                 String variable = (String) getVariable.invoke(obj);
                 String value = (String) getValue.invoke(obj);
 
-                // Create your REAL backend ExecutionStep model
-                ExecutionStep step = new ExecutionStep();
-                step.setLine(line);
-                step.setMethod(method);
-                step.setVariable(variable);
-                step.setValue(value);
+                // 2. Adapt to YOUR Real Model (Map instead of single fields)
+                Map<String, String> variables = new HashMap<>();
+                if (variable != null) {
+                    variables.put(variable, value);
+                }
+
+                // 3. Use YOUR Constructor: ExecutionStep(int line, String method, Map vars, int depth)
+                // I am passing '0' for depth since we don't track it in this simple version yet.
+                ExecutionStep step = new ExecutionStep(line, method, variables, 0);
+                
                 realSteps.add(step);
             }
         } catch (Exception e) {
